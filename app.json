@@ -1,29 +1,67 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
+    "name": "Safety Emergency App",
+    "slug": "safety-emergency-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#e74c3c"
     },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yourcompany.safetyemergency",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "This app needs access to location to share your location with emergency contacts",
+        "NSMotionUsageDescription": "This app uses motion sensors to detect emergency gestures",
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#e74c3c"
       },
-      "edgeToEdgeEnabled": true
+      "package": "com.yourcompany.safetyemergency",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "VIBRATE",
+        "RECORD_AUDIO",
+        "CAMERA"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow Safety Emergency App to use your location to share with emergency contacts."
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow Safety Emergency App to access motion sensors for gesture detection."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app accesses your photos to let you upload a profile picture."
+        }
+      ]
+    ]
   }
 }
