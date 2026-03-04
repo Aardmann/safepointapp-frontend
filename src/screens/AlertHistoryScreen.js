@@ -9,7 +9,8 @@ import {
   ActivityIndicator,
   Alert
 } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { MaterialIcons } from '@expo/vector-icons';
+
 import { supabase } from '../services/supabase';
 
 const AlertHistoryScreen = () => {
@@ -174,7 +175,7 @@ const AlertHistoryScreen = () => {
     >
       <View style={styles.alertHeader}>
         <View style={styles.alertIconContainer}>
-          <Icon name={getGestureIcon(item.trigger_type)} size={24} color="#e74c3c" />
+          <MaterialIcons name={getGestureIcon(item.trigger_type)} size={24} color="#e74c3c" />
         </View>
         <View style={styles.alertTypeContainer}>
           <Text style={styles.alertType}>
@@ -195,7 +196,7 @@ const AlertHistoryScreen = () => {
       
       {item.location_address && (
         <View style={styles.locationContainer}>
-          <Icon name="location-on" size={16} color="#666" />
+          <MaterialIcons name="location-on" size={16} color="#666" />
           <Text style={styles.locationText} numberOfLines={1}>
             {item.location_address}
           </Text>
@@ -204,7 +205,7 @@ const AlertHistoryScreen = () => {
 
       {item.alert_recipients && item.alert_recipients.length > 0 && (
         <View style={styles.recipientsContainer}>
-          <Icon name="notifications" size={14} color="#666" />
+          <MaterialIcons name="notifications" size={14} color="#666" />
           <Text style={styles.recipientsText}>
             {item.alert_recipients.length} contact{item.alert_recipients.length > 1 ? 's' : ''} notified
           </Text>
@@ -282,7 +283,7 @@ const AlertHistoryScreen = () => {
         }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Icon name="history" size={80} color="#ccc" />
+            <MaterialIcons name="history" size={80} color="#ccc" />
             <Text style={styles.emptyText}>No alerts found</Text>
             <Text style={styles.emptySubtext}>
               {filter === 'all' 

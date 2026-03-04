@@ -7,27 +7,30 @@ import {
   Alert,
   Vibration,
   Dimensions,
-  AppState,
   ScrollView,
-  ActivityIndicator
+  ActivityIndicator,
+  Platform,
 } from 'react-native';
-import { Accelerometer } from 'expo-sensors';
 import * as Location from 'expo-location';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { MaterialIcons } from '@expo/vector-icons';
 import { io } from 'socket.io-client';
-import axios from 'axios';
-import { supabase } from '../services/supabase';
+
+import gestureService from '../services/GestureService';
+import api from '../services/api';
 
 const { width } = Dimensions.get('window');
+
+const API_URL = Platform.select({
+  ios: 'http://localhost:5000',
+  android: 'http://10.0.2.2:5000',
+});
 
 const HomeScreen = ({ navigation }) => {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [location, setLocation] = useState(null);
-  const [accelerometerData, setAccelerometerData] = useState({ x: 0, y: 0, z: 0 });
-  const [shakeCount, setShakeCount] = useState(0);
   const [isEmergencyActive, setIsEmergencyActive] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [enabledGestures, setEnabledGestures] = useState([]);
@@ -35,25 +38,16 @@ const HomeScreen = ({ navigation }) => {
   const [loading, setLoading] = useState(true);
   
   const socketRef = useRef(null);
-  const lastShakeTime = useRef(0);
-  const appState = useRef(AppState.currentState);
-  
-  const API_URL = 'http://localhost:5000'; // Change to your backend URL
 
   useEffect(() => {
     loadUserData();
     setupLocation();
-    setupSensors();
     setupSocket();
     
-    const subscription = Accelerometer.addListener(handleAccelerometerData);
-    Accelerometer.setUpdateInterval(100);
-    
-    const appStateSubscription = AppState.addEventListener('change', handleAppStateChange);
+    // Initialize gesture service
+    gestureService.initialize();
     
     return () => {
-      subscription.remove();
-      appStateSubscription.remove();
       if (socketRef.current) {
         socketRef.current.disconnect();
       }
@@ -64,43 +58,46 @@ const HomeScreen = ({ navigation }) => {
     try {
       setLoading(true);
       
-      // Get current user from Supabase
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const userData = await AsyncStorage.getItem('user');
+      const token = await AsyncStorage.getItem('access_token');
       
-      if (authUser) {
-        // Get profile from Supabase
-        const { data: profileData, error: profileError } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', authUser.id)
-          .single();
+      if (userData && token) {
+        setUser(JSON.parse(userData));
         
-        if (profileError) throw profileError;
+        // Get profile from backend
+        try {
+          const response = await api.get('/api/user/profile');
+          
+          if (response.data.success) {
+            setProfile(response.data.profile);
+          }
+        } catch (error) {
+          console.error('Error loading profile:', error);
+        }
         
-        setUser(authUser);
-        setProfile(profileData);
-        
-        // Get enabled gestures
-        const { data: gesturesData, error: gesturesError } = await supabase
-          .from('gesture_preferences')
-          .select('*')
-          .eq('user_id', authUser.id)
-          .eq('enabled', true);
-        
-        if (!gesturesError) {
-          setEnabledGestures(gesturesData.map(g => g.gesture_type));
+        // Get gesture preferences
+        try {
+          const gesturesResponse = await api.get('/api/gesture-preferences');
+          
+          if (gesturesResponse.data.success) {
+            const enabled = gesturesResponse.data.preferences
+              .filter(g => g.enabled)
+              .map(g => g.gesture_type);
+            setEnabledGestures(enabled);
+          }
+        } catch (error) {
+          console.error('Error loading gestures:', error);
         }
         
         // Get recent alerts
-        const { data: alertsData, error: alertsError } = await supabase
-          .from('emergency_alerts')
-          .select('*')
-          .eq('user_id', authUser.id)
-          .order('timestamp', { ascending: false })
-          .limit(3);
-        
-        if (!alertsError) {
-          setRecentAlerts(alertsData);
+        try {
+          const alertsResponse = await api.get('/api/emergency/alerts?limit=3');
+          
+          if (alertsResponse.data.success) {
+            setRecentAlerts(alertsResponse.data.alerts);
+          }
+        } catch (error) {
+          console.error('Error loading alerts:', error);
         }
       }
     } catch (error) {
@@ -131,88 +128,43 @@ const HomeScreen = ({ navigation }) => {
     }
   };
 
-  const setupSensors = () => {
-    // Sensor setup
-  };
-
   const setupSocket = () => {
     socketRef.current = io(API_URL);
+    
+    // Authenticate socket connection
+    const authenticateSocket = async () => {
+      const token = await AsyncStorage.getItem('access_token');
+      if (token) {
+        socketRef.current.emit('authenticate', { token });
+      }
+    };
+    
+    authenticateSocket();
+    
     socketRef.current.on('emergency_triggered', (data) => {
       if (data.user_id === user?.id) {
         Alert.alert('Emergency Alert Sent', 'Your emergency contacts have been notified');
-        // Refresh alerts
+        loadRecentAlerts();
+      }
+    });
+    
+    socketRef.current.on('alert_resolved', (data) => {
+      if (data.user_id === user?.id) {
         loadRecentAlerts();
       }
     });
   };
 
   const loadRecentAlerts = async () => {
-    if (!user) return;
-    
-    const { data } = await supabase
-      .from('emergency_alerts')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('timestamp', { ascending: false })
-      .limit(3);
-    
-    if (data) {
-      setRecentAlerts(data);
-    }
-  };
-
-  const handleAccelerometerData = (data) => {
-    setAccelerometerData(data);
-    
-    if (!isEmergencyActive && enabledGestures.includes('shake')) {
-      // Detect shake gesture
-      const acceleration = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
-      const now = Date.now();
+    try {
+      const response = await api.get('/api/emergency/alerts?limit=3');
       
-      if (acceleration > 2.5) { // Shake threshold
-        if (now - lastShakeTime.current > 500) {
-          setShakeCount(prev => {
-            const newCount = prev + 1;
-            if (newCount >= 5) {
-              triggerEmergency('shake');
-              return 0;
-            }
-            return newCount;
-          });
-          lastShakeTime.current = now;
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-        }
-      } else {
-        setTimeout(() => {
-          setShakeCount(0);
-        }, 2000);
+      if (response.data.success) {
+        setRecentAlerts(response.data.alerts);
       }
+    } catch (error) {
+      console.error('Error loading recent alerts:', error);
     }
-    
-    // Detect fall if enabled
-    if (enabledGestures.includes('fall_detection')) {
-      detectFall(data);
-    }
-  };
-
-  const detectFall = (data) => {
-    const acceleration = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
-    
-    if (acceleration > 5) {
-      setTimeout(() => {
-        const stillness = Math.abs(data.x) < 0.5 && Math.abs(data.y) < 0.5 && Math.abs(data.z) < 0.5;
-        if (stillness) {
-          triggerEmergency('fall_detection');
-        }
-      }, 3000);
-    }
-  };
-
-  const handleAppStateChange = (nextAppState) => {
-    if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-      Vibration.vibrate(100);
-    }
-    appState.current = nextAppState;
   };
 
   const triggerEmergency = async (triggerType) => {
@@ -237,7 +189,7 @@ const HomeScreen = ({ navigation }) => {
     
     Alert.alert(
       'Emergency Alert',
-      `Emergency will be triggered in ${countdown} seconds. Tap CANCEL to abort.`,
+      `Emergency will be triggered in 5 seconds. Tap CANCEL to abort.`,
       [
         {
           text: 'CANCEL',
@@ -256,13 +208,6 @@ const HomeScreen = ({ navigation }) => {
 
   const sendEmergencyAlert = async (triggerType) => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session) {
-        Alert.alert('Error', 'Not authenticated');
-        return;
-      }
-
       const locationData = await Location.getCurrentPositionAsync({});
       const address = await Location.reverseGeocodeAsync({
         latitude: locationData.coords.latitude,
@@ -278,32 +223,9 @@ const HomeScreen = ({ navigation }) => {
         }
       };
       
-      // Send to backend
-      const response = await axios.post(
-        `${API_URL}/api/emergency/trigger`, 
-        alertData,
-        {
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`
-          }
-        }
-      );
+      const response = await api.post('/api/emergency/trigger', alertData);
       
       if (response.data.success) {
-        // Also save directly to Supabase as backup
-        await supabase
-          .from('emergency_alerts')
-          .insert([
-            {
-              user_id: user.id,
-              trigger_type: triggerType,
-              location_lat: locationData.coords.latitude,
-              location_lng: locationData.coords.longitude,
-              location_address: address[0] ? `${address[0].street}, ${address[0].city}` : 'Unknown',
-              status: 'active'
-            }
-          ]);
-        
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         Vibration.vibrate([0, 1000, 200, 1000, 200, 1000]);
         
@@ -317,7 +239,7 @@ const HomeScreen = ({ navigation }) => {
         );
       }
     } catch (error) {
-      console.error('Error sending emergency alert:', error);
+      console.error('Error sending emergency alert:', error.response?.data || error.message);
       Alert.alert('Error', 'Failed to send emergency alert. Please try again.');
       setIsEmergencyActive(false);
     }
@@ -341,36 +263,29 @@ const HomeScreen = ({ navigation }) => {
     return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
   };
 
-  // Helper function to get icon name for gesture type
   const getGestureIconName = (gesture) => {
     if (gesture.includes('volume')) return 'volume-up';
     if (gesture.includes('power')) return 'power-settings-new';
     if (gesture.includes('shake')) return 'vibration';
     if (gesture.includes('fall')) return 'personal-injury';
     if (gesture.includes('back')) return 'touch-app';
-    if (gesture.includes('tap')) return 'touch-app';
-    if (gesture.includes('swipe')) return 'swipe';
-    if (gesture.includes('pattern')) return 'gesture';
-    return 'gesture'; // default
+    if (gesture.includes('screen')) return 'screen-lock-portrait';
+    return 'gesture';
   };
 
-  // Helper function to get icon name for alert status
   const getAlertStatusIconName = (status) => {
     switch (status) {
       case 'active': return 'pending';
       case 'resolved': return 'check-circle';
-      case 'cancelled': return 'cancel';
       default: return 'error';
     }
   };
 
-  // Helper function to get color for alert status
   const getAlertStatusColor = (status) => {
     switch (status) {
-      case 'active': return '#f39c12'; // Orange
-      case 'resolved': return '#2ecc71'; // Green
-      case 'cancelled': return '#e74c3c'; // Red
-      default: return '#95a5a6'; // Gray
+      case 'active': return '#f39c12';
+      case 'resolved': return '#2ecc71';
+      default: return '#95a5a6';
     }
   };
 
@@ -389,7 +304,7 @@ const HomeScreen = ({ navigation }) => {
           Welcome, {profile?.full_name || profile?.username || 'User'}!
         </Text>
         <View style={styles.gestureStatus}>
-          <Icon name="check-circle" size={16} color="#2ecc71" />
+          <MaterialIcons name="check-circle" size={16} color="#2ecc71" />
           <Text style={styles.statusText}>
             {enabledGestures.length} gestures active
           </Text>
@@ -398,9 +313,9 @@ const HomeScreen = ({ navigation }) => {
       
       {isEmergencyActive && (
         <View style={styles.countdownContainer}>
-          <Icon name="warning" size={24} color="white" style={styles.countdownIcon} />
+          <MaterialIcons name="warning" size={24} color="white" />
           <Text style={styles.countdownText}>Emergency in: {countdown}s</Text>
-          <Text style={styles.countdownSubtext}>Tap CANCEL in alert dialog to abort</Text>
+          <Text style={styles.countdownSubtext}>Tap CANCEL in alert to abort</Text>
         </View>
       )}
       
@@ -410,40 +325,33 @@ const HomeScreen = ({ navigation }) => {
           onPress={handleManualTrigger}
           activeOpacity={0.7}
         >
-          <Icon name="warning" size={80} color="white" />
+          <MaterialIcons name="warning" size={80} color="white" />
           <Text style={styles.buttonText}>SOS</Text>
           <Text style={styles.buttonSubtext}>Tap for emergency</Text>
         </TouchableOpacity>
         
         <View style={styles.statsContainer}>
           <View style={styles.statCard}>
-            <Icon name="notifications-active" size={24} color="#e74c3c" />
+            <MaterialIcons name="notifications-active" size={24} color="#e74c3c" />
             <Text style={styles.statNumber}>{recentAlerts.length}</Text>
-            <Text style={styles.statLabel}>Total Alerts</Text>
+            <Text style={styles.statLabel}>Recent Alerts</Text>
           </View>
           <View style={styles.statCard}>
-            <Icon name="touch-app" size={24} color="#e74c3c" />
+            <MaterialIcons name="touch-app" size={24} color="#e74c3c" />
             <Text style={styles.statNumber}>{enabledGestures.length}</Text>
             <Text style={styles.statLabel}>Active Gestures</Text>
-          </View>
-          <View style={styles.statCard}>
-            <Icon name="pending-actions" size={24} color="#e74c3c" />
-            <Text style={styles.statNumber}>
-              {recentAlerts.filter(a => a.status === 'active').length}
-            </Text>
-            <Text style={styles.statLabel}>Active Alerts</Text>
           </View>
         </View>
         
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
-            <Icon name="gesture" size={20} color="#333" />
+            <MaterialIcons name="gesture" size={20} color="#333" />
             <Text style={styles.sectionTitle}>Active Gestures</Text>
           </View>
           <View style={styles.gestureGrid}>
             {enabledGestures.slice(0, 6).map((gesture, index) => (
               <View key={index} style={styles.gestureItem}>
-                <Icon 
+                <MaterialIcons 
                   name={getGestureIconName(gesture)}
                   size={28} 
                   color="#e74c3c" 
@@ -455,9 +363,9 @@ const HomeScreen = ({ navigation }) => {
             ))}
             {enabledGestures.length === 0 && (
               <View style={styles.noDataContainer}>
-                <Icon name="gesture" size={32} color="#ccc" />
+                <MaterialIcons name="gesture" size={32} color="#ccc" />
                 <Text style={styles.noDataText}>
-                  No gestures enabled. Go to Gestures settings to enable them.
+                  No gestures enabled. Go to Settings to enable them.
                 </Text>
               </View>
             )}
@@ -467,12 +375,12 @@ const HomeScreen = ({ navigation }) => {
         {recentAlerts.length > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
-              <Icon name="history" size={20} color="#333" />
+              <MaterialIcons name="history" size={20} color="#333" />
               <Text style={styles.sectionTitle}>Recent Alerts</Text>
             </View>
             {recentAlerts.map((alert, index) => (
               <View key={index} style={styles.alertItem}>
-                <Icon 
+                <MaterialIcons 
                   name={getAlertStatusIconName(alert.status)}
                   size={24} 
                   color={getAlertStatusColor(alert.status)} 
@@ -482,13 +390,12 @@ const HomeScreen = ({ navigation }) => {
                     {alert.trigger_type.replace(/_/g, ' ')}
                   </Text>
                   <View style={styles.alertMeta}>
-                    <Icon name="access-time" size={12} color="#999" />
+                    <MaterialIcons name="access-time" size={12} color="#999" />
                     <Text style={styles.alertTime}>
                       {formatDate(alert.timestamp)}
                     </Text>
                   </View>
                 </View>
-                <Icon name="chevron-right" size={20} color="#ccc" />
               </View>
             ))}
           </View>
@@ -497,11 +404,11 @@ const HomeScreen = ({ navigation }) => {
       
       {location && (
         <View style={styles.locationContainer}>
-          <Icon name="location-on" size={20} color="#666" />
+          <MaterialIcons name="location-on" size={20} color="#666" />
           <Text style={styles.locationText} numberOfLines={1}>
             {location.address}
           </Text>
-          <Icon name="my-location" size={16} color="#2ecc71" style={styles.locationIcon} />
+          <MaterialIcons name="my-location" size={16} color="#2ecc71" />
         </View>
       )}
     </ScrollView>
@@ -543,10 +450,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#e74c3c',
     padding: 15,
     alignItems: 'center',
-    flexDirection: 'column',
-  },
-  countdownIcon: {
-    marginBottom: 5,
   },
   countdownText: {
     color: 'white',
@@ -571,10 +474,6 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginBottom: 30,
     elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
   },
   buttonText: {
     color: 'white',
@@ -597,7 +496,7 @@ const styles = StyleSheet.create({
     padding: 15,
     borderRadius: 10,
     alignItems: 'center',
-    minWidth: 100,
+    minWidth: 120,
     elevation: 2,
   },
   statNumber: {
@@ -697,9 +596,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     flex: 1,
-  },
-  locationIcon: {
-    marginLeft: 5,
   },
 });
 

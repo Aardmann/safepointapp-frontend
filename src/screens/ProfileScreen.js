@@ -11,11 +11,13 @@ import {
   Image
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
 import { supabase } from '../services/supabase';
 import { decode } from 'base64-arraybuffer';
+import api from '../services/api';
+import gestureService from '../services/GestureService';
 
 const ProfileScreen = ({ navigation }) => {
   const [user, setUser] = useState(null);
@@ -38,8 +40,6 @@ const ProfileScreen = ({ navigation }) => {
     enabledGestures: 0
   });
 
-  const API_URL = 'http://localhost:5000';
-
   useEffect(() => {
     loadUserData();
   }, []);
@@ -48,42 +48,44 @@ const ProfileScreen = ({ navigation }) => {
     try {
       setLoading(true);
       
-      // Get current user from Supabase Auth
-      const { data: { user: authUser }, error: authError } = await supabase.auth.getUser();
+      // Get user from AsyncStorage
+      const userData = await AsyncStorage.getItem('user');
+      const token = await AsyncStorage.getItem('access_token');
       
-      if (authError) throw authError;
+      console.log('Loading profile, token exists:', !!token);
       
-      if (authUser) {
-        setUser(authUser);
+      if (!userData || !token) {
+        console.log('No user data or token found');
+        setLoading(false);
+        return;
+      }
+      
+      const parsedUser = JSON.parse(userData);
+      setUser(parsedUser);
+      
+      // Get profile from backend
+      try {
+        const response = await api.get('/api/user/profile');
+        console.log('Profile response:', response.data);
         
-        // Get profile from Supabase
-        const { data: profileData, error: profileError } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', authUser.id)
-          .single();
-
-        if (profileError && profileError.code !== 'PGRST116') {
-          throw profileError;
-        }
-
-        if (profileData) {
+        if (response.data.success) {
+          const profileData = response.data.profile;
           setProfile(profileData);
           setFormData({
             username: profileData.username || '',
             fullName: profileData.full_name || '',
-            email: authUser.email || '',
+            email: parsedUser.email || '',
             phone: profileData.phone || '',
             avatarUrl: profileData.avatar_url || null
           });
-        } else {
-          // Profile doesn't exist, create it
-          await createProfile(authUser);
         }
-
-        // Load user stats
-        await loadUserStats(authUser.id);
+      } catch (error) {
+        console.error('Error loading profile from API:', error.response?.data || error.message);
       }
+
+      // Load user stats
+      await loadUserStats(parsedUser.id);
+      
     } catch (error) {
       console.error('Error loading user data:', error);
       Alert.alert('Error', 'Failed to load profile data');
@@ -92,39 +94,9 @@ const ProfileScreen = ({ navigation }) => {
     }
   };
 
-  const createProfile = async (authUser) => {
-    try {
-      const newProfile = {
-        id: authUser.id,
-        username: authUser.user_metadata?.username || authUser.email?.split('@')[0],
-        full_name: authUser.user_metadata?.full_name || authUser.email?.split('@')[0],
-        phone: authUser.user_metadata?.phone || '',
-        avatar_url: null
-      };
-
-      const { error } = await supabase
-        .from('profiles')
-        .insert([newProfile]);
-
-      if (error) throw error;
-
-      setProfile(newProfile);
-      setFormData({
-        username: newProfile.username,
-        fullName: newProfile.full_name,
-        email: authUser.email,
-        phone: newProfile.phone,
-        avatarUrl: null
-      });
-
-    } catch (error) {
-      console.error('Error creating profile:', error);
-    }
-  };
-
   const loadUserStats = async (userId) => {
     try {
-      // Get alerts count
+      // Get alerts count from Supabase
       const { data: alerts, error: alertsError } = await supabase
         .from('emergency_alerts')
         .select('status')
@@ -132,7 +104,7 @@ const ProfileScreen = ({ navigation }) => {
 
       if (alertsError) throw alertsError;
 
-      // Get contacts count
+      // Get contacts count from Supabase
       const { count: contactsCount, error: contactsError } = await supabase
         .from('emergency_contacts')
         .select('*', { count: 'exact', head: true })
@@ -140,7 +112,7 @@ const ProfileScreen = ({ navigation }) => {
 
       if (contactsError) throw contactsError;
 
-      // Get enabled gestures count
+      // Get enabled gestures count from Supabase
       const { data: gestures, error: gesturesError } = await supabase
         .from('gesture_preferences')
         .select('enabled')
@@ -209,19 +181,18 @@ const ProfileScreen = ({ navigation }) => {
         .from('avatars')
         .getPublicUrl(filePath);
 
-      // Update profile with avatar URL
-      const { error: updateError } = await supabase
-        .from('profiles')
-        .update({ avatar_url: publicUrl })
-        .eq('id', user.id);
+      // Update profile with avatar URL via API
+      const response = await api.put('/api/user/profile', {
+        avatar_url: publicUrl
+      });
 
-      if (updateError) throw updateError;
+      if (response.data.success) {
+        setFormData(prev => ({ ...prev, avatarUrl: publicUrl }));
+        setProfile(prev => ({ ...prev, avatar_url: publicUrl }));
 
-      setFormData(prev => ({ ...prev, avatarUrl: publicUrl }));
-      setProfile(prev => ({ ...prev, avatar_url: publicUrl }));
-
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert('Success', 'Profile picture updated');
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        Alert.alert('Success', 'Profile picture updated');
+      }
 
     } catch (error) {
       console.error('Error uploading avatar:', error);
@@ -257,56 +228,39 @@ const ProfileScreen = ({ navigation }) => {
     try {
       setSaving(true);
 
-      // Update profile in Supabase
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .update({
-          username: formData.username.trim(),
-          full_name: formData.fullName.trim() || formData.username.trim(),
-          phone: formData.phone.trim(),
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', user.id);
-
-      if (profileError) throw profileError;
-
-      // Update email in auth if changed
-      if (formData.email !== user.email) {
-        const { error: emailError } = await supabase.auth.updateUser({
-          email: formData.email.trim()
-        });
-
-        if (emailError) throw emailError;
-      }
-
-      // Update local state
-      const updatedProfile = {
-        ...profile,
+      // Update profile via API
+      const response = await api.put('/api/user/profile', {
         username: formData.username.trim(),
         full_name: formData.fullName.trim() || formData.username.trim(),
-        phone: formData.phone.trim()
-      };
+        phone: formData.phone.trim(),
+        email: formData.email.trim()
+      });
 
-      setProfile(updatedProfile);
-      
-      // Update AsyncStorage
-      await AsyncStorage.setItem('user', JSON.stringify({
-        id: user.id,
-        email: formData.email,
-        username: updatedProfile.username,
-        fullName: updatedProfile.full_name,
-        phone: updatedProfile.phone,
-        avatarUrl: updatedProfile.avatar_url
-      }));
+      if (response.data.success) {
+        // Update local state
+        const updatedProfile = response.data.profile;
+        setProfile(updatedProfile);
+        
+        // Update AsyncStorage
+        const updatedUser = {
+          ...user,
+          email: formData.email,
+          username: updatedProfile.username,
+          fullName: updatedProfile.full_name,
+          phone: updatedProfile.phone
+        };
+        
+        await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
 
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      
-      setIsEditing(false);
-      Alert.alert('Success', 'Profile updated successfully');
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        
+        setIsEditing(false);
+        Alert.alert('Success', 'Profile updated successfully');
+      }
 
     } catch (error) {
-      console.error('Error updating profile:', error);
-      Alert.alert('Error', error.message || 'Failed to update profile');
+      console.error('Error updating profile:', error.response?.data || error.message);
+      Alert.alert('Error', error.response?.data?.error || 'Failed to update profile');
     } finally {
       setSaving(false);
     }
@@ -322,13 +276,31 @@ const ProfileScreen = ({ navigation }) => {
           text: 'Logout',
           onPress: async () => {
             try {
-              await supabase.auth.signOut();
+              setLoading(true);
+              
+              // Call logout API
+              try {
+                await api.post('/api/auth/logout');
+              } catch (error) {
+                console.error('Logout API error:', error);
+              }
+              
+              // Clear all stored data
               await AsyncStorage.removeItem('user');
+              await AsyncStorage.removeItem('access_token');
+              await AsyncStorage.removeItem('refresh_token');
               await AsyncStorage.removeItem('supabase-session');
-              navigation.replace('Auth');
+              
+              // Stop gesture service
+              gestureService.stopListening();
+              
+              // Navigation will happen automatically through App.js
+              
             } catch (error) {
               console.error('Error logging out:', error);
               Alert.alert('Error', 'Failed to logout');
+            } finally {
+              setLoading(false);
             }
           }
         }
@@ -339,11 +311,7 @@ const ProfileScreen = ({ navigation }) => {
   const handleDeleteAccount = () => {
     Alert.alert(
       'Delete Account',
-      'This action cannot be undone. All your data will be permanently deleted.\n\n' +
-      'This includes:\n' +
-      `• ${stats.totalContacts} emergency contacts\n` +
-      `• ${stats.totalAlerts} alert history\n` +
-      `• ${stats.enabledGestures} gesture settings`,
+      'This action cannot be undone. All your data will be permanently deleted.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -354,7 +322,6 @@ const ProfileScreen = ({ navigation }) => {
               setLoading(true);
 
               // Delete user data from Supabase
-              // Note: This will cascade delete due to foreign key constraints
               const { error } = await supabase
                 .from('profiles')
                 .delete()
@@ -362,13 +329,13 @@ const ProfileScreen = ({ navigation }) => {
 
               if (error) throw error;
 
-              // Delete auth user (requires admin API or backend)
-              // For now, we'll just sign out
-              await supabase.auth.signOut();
+              // Clear storage and logout
               await AsyncStorage.removeItem('user');
+              await AsyncStorage.removeItem('access_token');
+              await AsyncStorage.removeItem('refresh_token');
               await AsyncStorage.removeItem('supabase-session');
               
-              navigation.replace('Auth');
+              gestureService.stopListening();
               
             } catch (error) {
               console.error('Error deleting account:', error);
@@ -437,7 +404,7 @@ const ProfileScreen = ({ navigation }) => {
             </View>
           ) : (
             <View style={styles.editAvatarBadge}>
-              <Icon name="camera-alt" size={16} color="white" />
+              <MaterialIcons name="camera-alt" size={16} color="white" />
             </View>
           )}
         </TouchableOpacity>
@@ -474,7 +441,7 @@ const ProfileScreen = ({ navigation }) => {
           <View>
             <View style={styles.infoCard}>
               <View style={styles.infoRow}>
-                <Icon name="person" size={20} color="#666" />
+                <MaterialIcons name="person" size={20} color="#666" />
                 <View style={styles.infoContent}>
                   <Text style={styles.infoLabel}>Username</Text>
                   <Text style={styles.infoValue}>{profile?.username || 'Not set'}</Text>
@@ -482,7 +449,7 @@ const ProfileScreen = ({ navigation }) => {
               </View>
 
               <View style={styles.infoRow}>
-                <Icon name="badge" size={20} color="#666" />
+                <MaterialIcons name="badge" size={20} color="#666" />
                 <View style={styles.infoContent}>
                   <Text style={styles.infoLabel}>Full Name</Text>
                   <Text style={styles.infoValue}>{profile?.full_name || 'Not set'}</Text>
@@ -490,7 +457,7 @@ const ProfileScreen = ({ navigation }) => {
               </View>
 
               <View style={styles.infoRow}>
-                <Icon name="email" size={20} color="#666" />
+                <MaterialIcons name="email" size={20} color="#666" />
                 <View style={styles.infoContent}>
                   <Text style={styles.infoLabel}>Email</Text>
                   <Text style={styles.infoValue}>{user?.email}</Text>
@@ -498,20 +465,10 @@ const ProfileScreen = ({ navigation }) => {
               </View>
 
               <View style={styles.infoRow}>
-                <Icon name="phone" size={20} color="#666" />
+                <MaterialIcons name="phone" size={20} color="#666" />
                 <View style={styles.infoContent}>
                   <Text style={styles.infoLabel}>Phone</Text>
                   <Text style={styles.infoValue}>{profile?.phone || 'Not set'}</Text>
-                </View>
-              </View>
-
-              <View style={styles.infoRow}>
-                <Icon name="calendar-today" size={20} color="#666" />
-                <View style={styles.infoContent}>
-                  <Text style={styles.infoLabel}>Member Since</Text>
-                  <Text style={styles.infoValue}>
-                    {user?.created_at ? new Date(user.created_at).toLocaleDateString() : 'N/A'}
-                  </Text>
                 </View>
               </View>
             </View>
@@ -520,7 +477,7 @@ const ProfileScreen = ({ navigation }) => {
               style={styles.editButton}
               onPress={() => setIsEditing(true)}
             >
-              <Icon name="edit" size={20} color="white" />
+              <MaterialIcons name="edit" size={20} color="white" />
               <Text style={styles.editButtonText}>Edit Profile</Text>
             </TouchableOpacity>
           </View>
@@ -580,7 +537,6 @@ const ProfileScreen = ({ navigation }) => {
                   style={[styles.actionButton, styles.cancelButton]}
                   onPress={() => {
                     setIsEditing(false);
-                    // Reset form to original values
                     setFormData({
                       username: profile?.username || '',
                       fullName: profile?.full_name || '',
@@ -618,33 +574,15 @@ const ProfileScreen = ({ navigation }) => {
             style={styles.settingRow}
             onPress={handleResetPassword}
           >
-            <Icon name="lock" size={20} color="#666" />
+            <MaterialIcons name="lock" size={20} color="#666" />
             <Text style={styles.settingText}>Change Password</Text>
-            <Icon name="chevron-right" size={20} color="#ccc" />
+            <MaterialIcons name="chevron-right" size={20} color="#ccc" />
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.settingRow}>
-            <Icon name="notifications" size={20} color="#666" />
+            <MaterialIcons name="notifications" size={20} color="#666" />
             <Text style={styles.settingText}>Notification Preferences</Text>
-            <Icon name="chevron-right" size={20} color="#ccc" />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.settingRow}>
-            <Icon name="privacy-tip" size={20} color="#666" />
-            <Text style={styles.settingText}>Privacy Settings</Text>
-            <Icon name="chevron-right" size={20} color="#ccc" />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.settingRow}>
-            <Icon name="help" size={20} color="#666" />
-            <Text style={styles.settingText}>Help & Support</Text>
-            <Icon name="chevron-right" size={20} color="#ccc" />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.settingRow}>
-            <Icon name="info" size={20} color="#666" />
-            <Text style={styles.settingText}>About</Text>
-            <Icon name="chevron-right" size={20} color="#ccc" />
+            <MaterialIcons name="chevron-right" size={20} color="#ccc" />
           </TouchableOpacity>
         </View>
 
@@ -656,7 +594,7 @@ const ProfileScreen = ({ navigation }) => {
             style={styles.logoutButton}
             onPress={handleLogout}
           >
-            <Icon name="logout" size={20} color="#e74c3c" />
+            <MaterialIcons name="logout" size={20} color="#e74c3c" />
             <Text style={styles.logoutText}>Logout</Text>
           </TouchableOpacity>
 
@@ -668,7 +606,6 @@ const ProfileScreen = ({ navigation }) => {
           </TouchableOpacity>
         </View>
 
-        {/* App Version */}
         <Text style={styles.versionText}>Version 1.0.0</Text>
       </View>
     </ScrollView>
@@ -771,10 +708,6 @@ const styles = StyleSheet.create({
     minWidth: 70,
     margin: 5,
     elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
   },
   activeStatCard: {
     backgroundColor: '#fff3e0',

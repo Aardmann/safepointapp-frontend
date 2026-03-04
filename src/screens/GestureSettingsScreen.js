@@ -10,9 +10,10 @@ import {
   ActivityIndicator
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { MaterialIcons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
-import { supabase } from '../services/supabase';
+import * as Haptics from 'expo-haptics';
+import api from '../services/api';
 
 const GestureSettingsScreen = () => {
   const [gestures, setGestures] = useState([
@@ -25,9 +26,9 @@ const GestureSettingsScreen = () => {
       sensitivity: 5
     },
     {
-      id: 'power_button_five',
-      name: 'Power Button (5x)',
-      description: 'Press power button 5 times quickly',
+      id: 'power_button_three',
+      name: 'Power Button (3x)',
+      description: 'Press power button 3 times quickly',
       icon: 'power-settings-new',
       enabled: true,
       sensitivity: 5
@@ -51,16 +52,8 @@ const GestureSettingsScreen = () => {
     {
       id: 'shake',
       name: 'Shake',
-      description: 'Shake phone 5 times',
+      description: 'Shake phone for 5 seconds',
       icon: 'vibration',
-      enabled: true,
-      sensitivity: 5
-    },
-    {
-      id: 'sos_motion',
-      name: 'SOS Motion',
-      description: 'Draw SOS pattern in air',
-      icon: 'gesture',
       enabled: true,
       sensitivity: 5
     },
@@ -79,14 +72,6 @@ const GestureSettingsScreen = () => {
       icon: 'warning',
       enabled: true,
       sensitivity: 5
-    },
-    {
-      id: 'silent_scream',
-      name: 'Silent Scream',
-      description: 'Cover microphone and scream',
-      icon: 'mic-off',
-      enabled: true,
-      sensitivity: 5
     }
   ]);
 
@@ -103,20 +88,18 @@ const GestureSettingsScreen = () => {
       setLoading(true);
       
       // Get current user
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const userData = await AsyncStorage.getItem('user');
+      const token = await AsyncStorage.getItem('access_token');
       
-      if (authUser) {
-        setUser(authUser);
+      if (userData && token) {
+        setUser(JSON.parse(userData));
         
-        // Load gesture preferences from Supabase
-        const { data: preferences, error } = await supabase
-          .from('gesture_preferences')
-          .select('*')
-          .eq('user_id', authUser.id);
+        // Load gesture preferences from backend
+        const response = await api.get('/api/gesture-preferences');
         
-        if (error) throw error;
-        
-        if (preferences && preferences.length > 0) {
+        if (response.data.success) {
+          const preferences = response.data.preferences;
+          
           // Update gestures with saved preferences
           setGestures(prevGestures => 
             prevGestures.map(gesture => {
@@ -128,35 +111,13 @@ const GestureSettingsScreen = () => {
               } : gesture;
             })
           );
-        } else {
-          // No preferences found, create default ones
-          await createDefaultPreferences(authUser.id);
         }
       }
     } catch (error) {
-      console.error('Error loading preferences:', error);
+      console.error('Error loading preferences:', error.response?.data || error.message);
       Alert.alert('Error', 'Failed to load gesture settings');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const createDefaultPreferences = async (userId) => {
-    try {
-      const defaultGestures = gestures.map(g => ({
-        user_id: userId,
-        gesture_type: g.id,
-        enabled: g.enabled,
-        sensitivity: g.sensitivity
-      }));
-
-      const { error } = await supabase
-        .from('gesture_preferences')
-        .insert(defaultGestures);
-
-      if (error) throw error;
-    } catch (error) {
-      console.error('Error creating default preferences:', error);
     }
   };
 
@@ -167,20 +128,22 @@ const GestureSettingsScreen = () => {
     );
     setGestures(updatedGestures);
     
-    // Save to Supabase
+    // Save to backend
     try {
       setSaving(true);
-      const gesture = updatedGestures.find(g => g.id === gestureId);
       
-      const { error } = await supabase
-        .from('gesture_preferences')
-        .update({ enabled: gesture.enabled })
-        .eq('user_id', user.id)
-        .eq('gesture_type', gestureId);
-
-      if (error) throw error;
+      await api.put('/api/gesture-preferences', {
+        preferences: updatedGestures.map(g => ({
+          gesture_type: g.id,
+          enabled: g.enabled,
+          sensitivity: g.sensitivity
+        }))
+      });
+      
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      
     } catch (error) {
-      console.error('Error updating gesture:', error);
+      console.error('Error updating gesture:', error.response?.data || error.message);
       Alert.alert('Error', 'Failed to update gesture setting');
       // Revert on error
       setGestures(prev => prev.map(g => 
@@ -198,17 +161,18 @@ const GestureSettingsScreen = () => {
     );
     setGestures(updatedGestures);
     
-    // Save to Supabase
+    // Save to backend
     try {
-      const { error } = await supabase
-        .from('gesture_preferences')
-        .update({ sensitivity: value })
-        .eq('user_id', user.id)
-        .eq('gesture_type', gestureId);
-
-      if (error) throw error;
+      await api.put('/api/gesture-preferences', {
+        preferences: updatedGestures.map(g => ({
+          gesture_type: g.id,
+          enabled: g.enabled,
+          sensitivity: g.sensitivity
+        }))
+      });
+      
     } catch (error) {
-      console.error('Error updating sensitivity:', error);
+      console.error('Error updating sensitivity:', error.response?.data || error.message);
     }
   };
 
@@ -223,7 +187,6 @@ const GestureSettingsScreen = () => {
         { 
           text: 'Start Test', 
           onPress: () => {
-            // Here you would implement actual gesture testing
             Alert.alert(
               'Listening',
               'Perform the gesture...',
@@ -257,34 +220,26 @@ const GestureSettingsScreen = () => {
             try {
               setLoading(true);
               
-              // Reset all gestures to default
               const defaultGestures = gestures.map(g => ({
-                user_id: user.id,
                 gesture_type: g.id,
                 enabled: true,
                 sensitivity: 5
               }));
-
-              // Delete existing and insert defaults
-              await supabase
-                .from('gesture_preferences')
-                .delete()
-                .eq('user_id', user.id);
-
-              await supabase
-                .from('gesture_preferences')
-                .insert(defaultGestures);
-
+              
+              await api.put('/api/gesture-preferences', {
+                preferences: defaultGestures
+              });
+              
               // Update local state
               setGestures(prev => prev.map(g => ({
                 ...g,
                 enabled: true,
                 sensitivity: 5
               })));
-
+              
               Alert.alert('Success', 'Settings reset to default');
             } catch (error) {
-              console.error('Error resetting settings:', error);
+              console.error('Error resetting settings:', error.response?.data || error.message);
               Alert.alert('Error', 'Failed to reset settings');
             } finally {
               setLoading(false);
@@ -307,7 +262,6 @@ const GestureSettingsScreen = () => {
   return (
     <ScrollView style={styles.container}>
       <View style={styles.header}>
-        {/*<Text style={styles.headerTitle}>Gesture Settings</Text>*/}
         <Text style={styles.headerSubtitle}>
           Customize how to trigger emergency alerts
         </Text>
@@ -324,7 +278,7 @@ const GestureSettingsScreen = () => {
         <View key={gesture.id} style={styles.gestureCard}>
           <View style={styles.gestureHeader}>
             <View style={styles.gestureIconContainer}>
-              <Icon name={gesture.icon} size={24} color="#e74c3c" />
+              <MaterialIcons name={gesture.icon} size={24} color="#e74c3c" />
             </View>
             <View style={styles.gestureInfo}>
               <Text style={styles.gestureName}>{gesture.name}</Text>
@@ -341,15 +295,15 @@ const GestureSettingsScreen = () => {
 
           {gesture.enabled && (
             <View style={styles.sensitivityContainer}>
-                <View style={styles.sensitivityHeader}>
+              <View style={styles.sensitivityHeader}>
                 <Text style={styles.sensitivityLabel}>Sensitivity</Text>
                 <Text style={styles.sensitivityValue}>
-                    {gesture.sensitivity === 1 ? 'Low' : 
-                    gesture.sensitivity === 10 ? 'High' : 
-                    `${gesture.sensitivity}/10`}
+                  {gesture.sensitivity === 1 ? 'Low' : 
+                   gesture.sensitivity === 10 ? 'High' : 
+                   `${gesture.sensitivity}/10`}
                 </Text>
-                </View>
-                <Slider
+              </View>
+              <Slider
                 style={styles.slider}
                 minimumValue={1}
                 maximumValue={10}
@@ -360,27 +314,27 @@ const GestureSettingsScreen = () => {
                 maximumTrackTintColor="#ddd"
                 thumbTintColor="#e74c3c"
                 disabled={saving}
-                />
+              />
             </View>
-           )}
+          )}
 
           <TouchableOpacity
             style={styles.testButton}
             onPress={() => testGesture(gesture.id)}
           >
-            <Icon name="play-arrow" size={16} color="#666" />
+            <MaterialIcons name="play-arrow" size={16} color="#666" />
             <Text style={styles.testButtonText}>Test Gesture</Text>
           </TouchableOpacity>
         </View>
       ))}
 
       <TouchableOpacity style={styles.resetButton} onPress={resetToDefaults}>
-        <Icon name="settings-backup-restore" size={20} color="#e74c3c" />
+        <MaterialIcons name="settings-backup-restore" size={20} color="#e74c3c" />
         <Text style={styles.resetButtonText}>Reset to Default Settings</Text>
       </TouchableOpacity>
 
       <View style={styles.infoContainer}>
-        <Icon name="info" size={20} color="#3498db" />
+        <MaterialIcons name="info" size={20} color="#3498db" />
         <Text style={styles.infoText}>
           Test your gestures in a safe environment. Higher sensitivity means easier to trigger.
         </Text>
@@ -408,11 +362,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderBottomWidth: 1,
     borderBottomColor: '#ddd',
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#333',
   },
   headerSubtitle: {
     fontSize: 14,

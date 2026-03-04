@@ -12,10 +12,17 @@ import {
   ActivityIndicator
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Icon from 'react-native-vector-icons/MaterialIcons';
-import { supabase } from '../services/supabase';
+import { MaterialIcons } from '@expo/vector-icons';
+import axios from 'axios';
 
-const AuthScreen = ({ navigation }) => {
+const API_URL = Platform.select({
+  ios: 'http://localhost:5000',
+  android: 'http://10.0.2.2:5000',
+  // For physical device, use your computer's IP
+  // default: 'http://192.168.1.x:5000'
+});
+
+const AuthScreen = ({ navigation, route }) => {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
@@ -26,6 +33,8 @@ const AuthScreen = ({ navigation }) => {
     fullName: ''
   });
 
+  const { onLogin } = route.params || {};
+
   const handleInputChange = (field, value) => {
     setFormData({ ...formData, [field]: value });
   };
@@ -35,137 +44,40 @@ const AuthScreen = ({ navigation }) => {
       Alert.alert('Error', 'Email and password are required');
       return false;
     }
-    if (!isLogin && (!formData.username || !formData.phone)) {
-      Alert.alert('Error', 'All fields are required for registration');
-      return false;
+    if (!isLogin) {
+      if (!formData.username) {
+        Alert.alert('Error', 'Username is required');
+        return false;
+      }
+      if (!formData.phone) {
+        Alert.alert('Error', 'Phone number is required');
+        return false;
+      }
     }
     return true;
   };
 
   const handleLogin = async () => {
-  setLoading(true);
-  try {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: formData.email,
-      password: formData.password,
-    });
-
-    if (error) throw error;
-
-    if (data.user) {
-      // Try to get user profile
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', data.user.id)
-        .single();
-
-      // If profile doesn't exist, create it
-      if (profileError && profileError.code === 'PGRST116') {
-        console.log('Profile not found, creating one...');
-        
-        // Create profile from user metadata
-        const { data: newProfile, error: createError } = await supabase
-          .from('profiles')
-          .insert([
-            {
-              id: data.user.id,
-              username: data.user.user_metadata?.username || data.user.email?.split('@')[0],
-              full_name: data.user.user_metadata?.full_name || data.user.email?.split('@')[0],
-              phone: data.user.user_metadata?.phone || '',
-            }
-          ])
-          .select()
-          .single();
-
-        if (createError) throw createError;
-
-        // Create default gesture preferences
-        const defaultGestures = [
-          'volume_buttons', 'power_button_five', 'all_buttons',
-          'back_tap', 'shake', 'sos_motion', 'screen_cover',
-          'fall_detection', 'silent_scream'
-        ];
-
-        for (const gesture of defaultGestures) {
-          await supabase
-            .from('gesture_preferences')
-            .insert([
-              {
-                user_id: data.user.id,
-                gesture_type: gesture,
-                enabled: true,
-                sensitivity: 5
-              }
-            ]);
-        }
-
-        // Store user data with new profile
-        const userData = {
-          id: data.user.id,
-          email: data.user.email,
-          username: newProfile.username,
-          fullName: newProfile.full_name,
-          phone: newProfile.phone,
-          avatarUrl: newProfile.avatar_url
-        };
-
-        await AsyncStorage.setItem('user', JSON.stringify(userData));
-        await AsyncStorage.setItem('supabase-session', JSON.stringify(data.session));
-
-        navigation.replace('MainApp');
-      } else if (profileError) {
-        throw profileError;
-      } else {
-        // Profile exists
-        const userData = {
-          id: data.user.id,
-          email: data.user.email,
-          username: profile.username,
-          fullName: profile.full_name,
-          phone: profile.phone,
-          avatarUrl: profile.avatar_url
-        };
-
-        await AsyncStorage.setItem('user', JSON.stringify(userData));
-        await AsyncStorage.setItem('supabase-session', JSON.stringify(data.session));
-
-        navigation.replace('mainApp');
-      }
-    }
-  } catch (error) {
-    console.error('Login error:', error);
-    Alert.alert('Error', error.message || 'Login failed');
-  } finally {
-    setLoading(false);
-  }
-};
-
-  const handleRegister = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase.auth.signUp({
+      console.log('Attempting login with:', formData.email);
+      
+      const response = await axios.post(`${API_URL}/api/auth/login`, {
         email: formData.email,
-        password: formData.password,
-        options: {
-          data: {
-            username: formData.username,
-            full_name: formData.fullName || formData.username,
-            phone: formData.phone,
-          },
-        },
+        password: formData.password
       });
 
-      if (error) throw error;
+      console.log('Login response:', response.data);
 
-      if (data.user) {
-        Alert.alert(
-          'Success',
-          'Registration successful! Please check your email for verification.',
-          [{ text: 'OK', onPress: () => setIsLogin(true) }]
-        );
-
-        // Clear form
+      if (response.data.success) {
+        const { user, session } = response.data;
+        
+        // Store user data and session
+        await AsyncStorage.setItem('user', JSON.stringify(user));
+        await AsyncStorage.setItem('access_token', session.access_token);
+        await AsyncStorage.setItem('refresh_token', session.refresh_token);
+        
+        // Reset form
         setFormData({
           username: '',
           email: '',
@@ -173,10 +85,60 @@ const AuthScreen = ({ navigation }) => {
           password: '',
           fullName: ''
         });
+        
+        // Call the onLogin callback to update auth state in App.js
+        if (onLogin) {
+          onLogin();
+        }
       }
     } catch (error) {
-      console.error('Registration error:', error);
-      Alert.alert('Error', error.message || 'Registration failed');
+      console.error('Login error:', error.response?.data || error.message);
+      Alert.alert(
+        'Error', 
+        error.response?.data?.error || 'Login failed. Please check your credentials.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRegister = async () => {
+    setLoading(true);
+    try {
+      console.log('Attempting registration with:', formData.email);
+      
+      const response = await axios.post(`${API_URL}/api/auth/register`, {
+        username: formData.username,
+        email: formData.email,
+        password: formData.password,
+        phone: formData.phone,
+        full_name: formData.fullName || formData.username
+      });
+
+      console.log('Registration response:', response.data);
+
+      if (response.data.success) {
+        Alert.alert(
+          'Success',
+          'Registration successful! You can now login.',
+          [{ text: 'OK', onPress: () => {
+            setIsLogin(true);
+            setFormData({
+              username: '',
+              email: '',
+              phone: '',
+              password: '',
+              fullName: ''
+            });
+          }}]
+        );
+      }
+    } catch (error) {
+      console.error('Registration error:', error.response?.data || error.message);
+      Alert.alert(
+        'Error',
+        error.response?.data?.error || 'Registration failed. Please try again.'
+      );
     } finally {
       setLoading(false);
     }
@@ -202,7 +164,7 @@ const AuthScreen = ({ navigation }) => {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <Icon name="warning" size={80} color="#e74c3c" />
+          <MaterialIcons name="warning" size={80} color="#e74c3c" />
           <Text style={styles.title}>Safety Emergency App</Text>
           <Text style={styles.subtitle}>
             {isLogin ? 'Welcome Back!' : 'Create Account'}
@@ -213,7 +175,7 @@ const AuthScreen = ({ navigation }) => {
           {!isLogin && (
             <>
               <View style={styles.inputContainer}>
-                <Icon name="person" size={20} color="#666" style={styles.inputIcon} />
+                <MaterialIcons name="person" size={20} color="#666" style={styles.inputIcon} />
                 <TextInput
                   style={styles.input}
                   placeholder="Username *"
@@ -224,7 +186,7 @@ const AuthScreen = ({ navigation }) => {
               </View>
 
               <View style={styles.inputContainer}>
-                <Icon name="badge" size={20} color="#666" style={styles.inputIcon} />
+                <MaterialIcons name="badge" size={20} color="#666" style={styles.inputIcon} />
                 <TextInput
                   style={styles.input}
                   placeholder="Full Name (Optional)"
@@ -234,7 +196,7 @@ const AuthScreen = ({ navigation }) => {
               </View>
 
               <View style={styles.inputContainer}>
-                <Icon name="phone" size={20} color="#666" style={styles.inputIcon} />
+                <MaterialIcons name="phone" size={20} color="#666" style={styles.inputIcon} />
                 <TextInput
                   style={styles.input}
                   placeholder="Phone Number *"
@@ -247,7 +209,7 @@ const AuthScreen = ({ navigation }) => {
           )}
 
           <View style={styles.inputContainer}>
-            <Icon name="email" size={20} color="#666" style={styles.inputIcon} />
+            <MaterialIcons name="email" size={20} color="#666" style={styles.inputIcon} />
             <TextInput
               style={styles.input}
               placeholder="Email *"
@@ -259,7 +221,7 @@ const AuthScreen = ({ navigation }) => {
           </View>
 
           <View style={styles.inputContainer}>
-            <Icon name="lock" size={20} color="#666" style={styles.inputIcon} />
+            <MaterialIcons name="lock" size={20} color="#666" style={styles.inputIcon} />
             <TextInput
               style={styles.input}
               placeholder="Password *"

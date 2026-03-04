@@ -13,9 +13,9 @@ import {
   ActivityIndicator
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Icon from 'react-native-vector-icons/MaterialIcons';
-import { supabase } from '../services/supabase';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import api from '../services/api';
 
 const EmergencyContactsScreen = () => {
   const [contacts, setContacts] = useState([]);
@@ -42,13 +42,20 @@ const EmergencyContactsScreen = () => {
     try {
       setLoading(true);
       
-      // Get current user
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      // Get current user from AsyncStorage
+      const userData = await AsyncStorage.getItem('user');
+      const token = await AsyncStorage.getItem('access_token');
       
-      if (authUser) {
-        setUser(authUser);
-        await loadContacts(authUser.id);
+      if (!userData || !token) {
+        console.log('No user data or token found');
+        setLoading(false);
+        return;
       }
+      
+      const parsedUser = JSON.parse(userData);
+      setUser(parsedUser);
+      
+      await loadContacts();
     } catch (error) {
       console.error('Error loading user:', error);
       Alert.alert('Error', 'Failed to load user data');
@@ -57,26 +64,25 @@ const EmergencyContactsScreen = () => {
     }
   };
 
-  const loadContacts = async (userId) => {
+  const loadContacts = async () => {
     try {
-      const { data, error } = await supabase
-        .from('emergency_contacts')
-        .select('*')
-        .eq('user_id', userId)
-        .order('priority', { ascending: true });
-
-      if (error) throw error;
+      console.log('Loading contacts...');
+      const response = await api.get('/api/emergency-contacts');
       
-      setContacts(data || []);
+      console.log('Contacts response:', response.data);
+      
+      if (response.data.success) {
+        setContacts(response.data.contacts || []);
+      }
     } catch (error) {
-      console.error('Error loading contacts:', error);
+      console.error('Error loading contacts:', error.response?.data || error.message);
       Alert.alert('Error', 'Failed to load emergency contacts');
     }
   };
 
   const handleRefresh = () => {
     setRefreshing(true);
-    loadContacts(user.id).then(() => setRefreshing(false));
+    loadContacts().then(() => setRefreshing(false));
   };
 
   const handleAddContact = () => {
@@ -122,21 +128,18 @@ const EmergencyContactsScreen = () => {
     try {
       setSaving(true);
       
-      const { error } = await supabase
-        .from('emergency_contacts')
-        .delete()
-        .eq('id', contact.id);
+      const response = await api.delete(`/api/emergency-contacts/${contact.id}`);
 
-      if (error) throw error;
-
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      
-      // Update local state
-      setContacts(prev => prev.filter(c => c.id !== contact.id));
-      
-      Alert.alert('Success', 'Contact deleted successfully');
+      if (response.data.success) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        
+        // Update local state
+        setContacts(prev => prev.filter(c => c.id !== contact.id));
+        
+        Alert.alert('Success', 'Contact deleted successfully');
+      }
     } catch (error) {
-      console.error('Error deleting contact:', error);
+      console.error('Error deleting contact:', error.response?.data || error.message);
       Alert.alert('Error', 'Failed to delete contact');
     } finally {
       setSaving(false);
@@ -170,57 +173,47 @@ const EmergencyContactsScreen = () => {
 
       if (editingContact) {
         // Update existing contact
-        const { error } = await supabase
-          .from('emergency_contacts')
-          .update({
-            name: formData.name.trim(),
-            phone: formData.phone.trim(),
-            email: formData.email.trim() || null,
-            relationship: formData.relationship.trim() || null,
-            priority: formData.priority
-          })
-          .eq('id', editingContact.id);
+        const response = await api.put(`/api/emergency-contacts/${editingContact.id}`, {
+          name: formData.name.trim(),
+          phone: formData.phone.trim(),
+          email: formData.email.trim() || null,
+          relationship: formData.relationship.trim() || null,
+          priority: formData.priority
+        });
 
-        if (error) throw error;
+        if (response.data.success) {
+          // Update local state
+          setContacts(prev => prev.map(c => 
+            c.id === editingContact.id 
+              ? { ...c, ...formData }
+              : c
+          ));
 
-        // Update local state
-        setContacts(prev => prev.map(c => 
-          c.id === editingContact.id 
-            ? { ...c, ...formData }
-            : c
-        ));
-
-        Alert.alert('Success', 'Contact updated successfully');
+          Alert.alert('Success', 'Contact updated successfully');
+        }
       } else {
         // Add new contact
-        const { data, error } = await supabase
-          .from('emergency_contacts')
-          .insert([
-            {
-              user_id: user.id,
-              name: formData.name.trim(),
-              phone: formData.phone.trim(),
-              email: formData.email.trim() || null,
-              relationship: formData.relationship.trim() || null,
-              priority: formData.priority
-            }
-          ])
-          .select();
+        const response = await api.post('/api/emergency-contacts', {
+          name: formData.name.trim(),
+          phone: formData.phone.trim(),
+          email: formData.email.trim() || null,
+          relationship: formData.relationship.trim() || null,
+          priority: formData.priority
+        });
 
-        if (error) throw error;
-
-        // Update local state
-        setContacts(prev => [...prev, data[0]]);
-
-        Alert.alert('Success', 'Contact added successfully');
+        if (response.data.success) {
+          // Update local state
+          setContacts(prev => [...prev, response.data.contact]);
+          Alert.alert('Success', 'Contact added successfully');
+        }
       }
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setModalVisible(false);
       
     } catch (error) {
-      console.error('Error saving contact:', error);
-      Alert.alert('Error', 'Failed to save contact');
+      console.error('Error saving contact:', error.response?.data || error.message);
+      Alert.alert('Error', error.response?.data?.error || 'Failed to save contact');
     } finally {
       setSaving(false);
     }
@@ -236,7 +229,6 @@ const EmergencyContactsScreen = () => {
           text: 'Send Test',
           onPress: async () => {
             try {
-              // Here you would call your backend to send a test SMS
               Alert.alert('Success', 'Test alert sent (simulated)');
             } catch (error) {
               Alert.alert('Error', 'Failed to send test alert');
@@ -267,17 +259,16 @@ const EmergencyContactsScreen = () => {
     try {
       setContacts(newContacts);
       
-      // Update in Supabase
+      // Update in backend
       for (const update of updates) {
-        await supabase
-          .from('emergency_contacts')
-          .update({ priority: update.priority })
-          .eq('id', update.id);
+        await api.put(`/api/emergency-contacts/${update.id}`, {
+          priority: update.priority
+        });
       }
     } catch (error) {
       console.error('Error updating priority:', error);
       // Revert on error
-      loadContacts(user.id);
+      loadContacts();
     }
   };
 
@@ -288,7 +279,7 @@ const EmergencyContactsScreen = () => {
           onPress={() => movePriority(item, 'up')}
           disabled={index === 0}
         >
-          <Icon 
+          <MaterialIcons 
             name="arrow-upward" 
             size={20} 
             color={index === 0 ? '#ccc' : '#666'} 
@@ -299,7 +290,7 @@ const EmergencyContactsScreen = () => {
           onPress={() => movePriority(item, 'down')}
           disabled={index === contacts.length - 1}
         >
-          <Icon 
+          <MaterialIcons 
             name="arrow-downward" 
             size={20} 
             color={index === contacts.length - 1 ? '#ccc' : '#666'} 
@@ -327,7 +318,7 @@ const EmergencyContactsScreen = () => {
           style={[styles.actionButton, styles.testButton]}
           onPress={() => handleTestAlert(item)}
         >
-          <Icon name="notifications-active" size={18} color="#3498db" />
+          <MaterialIcons name="notifications-active" size={18} color="#3498db" />
           <Text style={styles.testButtonText}>Test</Text>
         </TouchableOpacity>
         
@@ -335,7 +326,7 @@ const EmergencyContactsScreen = () => {
           style={[styles.actionButton, styles.editButton]}
           onPress={() => handleEditContact(item)}
         >
-          <Icon name="edit" size={18} color="#f39c12" />
+          <MaterialIcons name="edit" size={18} color="#f39c12" />
           <Text style={styles.editButtonText}>Edit</Text>
         </TouchableOpacity>
         
@@ -343,7 +334,7 @@ const EmergencyContactsScreen = () => {
           style={[styles.actionButton, styles.deleteButton]}
           onPress={() => handleDeleteContact(item)}
         >
-          <Icon name="delete" size={18} color="#e74c3c" />
+          <MaterialIcons name="delete" size={18} color="#e74c3c" />
           <Text style={styles.deleteButtonText}>Delete</Text>
         </TouchableOpacity>
       </View>
@@ -362,7 +353,6 @@ const EmergencyContactsScreen = () => {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        {/*<Text style={styles.headerTitle}>Emergency Contacts</Text>*/}
         <Text style={styles.headerSubtitle}>
           {contacts.length <= 1 ? 'This' : 'These'} {contacts.length} contact{contacts.length !== 1 ? 's' : ''} will be notified in case of emergency
         </Text>
@@ -378,7 +368,7 @@ const EmergencyContactsScreen = () => {
         }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Icon name="contacts" size={80} color="#ccc" />
+            <MaterialIcons name="contacts" size={80} color="#ccc" />
             <Text style={styles.emptyText}>No emergency contacts</Text>
             <Text style={styles.emptySubtext}>
               Add contacts to notify in case of emergency
@@ -392,7 +382,7 @@ const EmergencyContactsScreen = () => {
         onPress={handleAddContact}
         disabled={saving}
       >
-        <Icon name="add" size={30} color="white" />
+        <MaterialIcons name="add" size={30} color="white" />
       </TouchableOpacity>
 
       {/* Add/Edit Contact Modal */}
@@ -412,7 +402,7 @@ const EmergencyContactsScreen = () => {
                 onPress={() => !saving && setModalVisible(false)}
                 disabled={saving}
               >
-                <Icon name="close" size={24} color="#666" />
+                <MaterialIcons name="close" size={24} color="#666" />
               </TouchableOpacity>
             </View>
 
@@ -504,11 +494,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderBottomWidth: 1,
     borderBottomColor: '#ddd',
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#333',
   },
   headerSubtitle: {
     fontSize: 14,
@@ -643,10 +628,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
   },
   modalOverlay: {
     flex: 1,
