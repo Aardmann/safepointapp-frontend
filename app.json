@@ -11,21 +11,25 @@
       "resizeMode": "contain",
       "backgroundColor": "#FFFFFF"
     },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
+    "assetBundlePatterns": ["**/*"],
+
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.yourcompany.safetyemergency",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "This app needs access to location to share your location with emergency contacts",
-        "NSMotionUsageDescription": "This app uses motion sensors to detect emergency gestures",
+        "NSLocationWhenInUseUsageDescription": "Used to share your location with emergency contacts when an alert is triggered.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "The app needs background location to include your position in emergency alerts even when backgrounded.",
+        "NSLocationAlwaysUsageDescription": "Background location is required to send your coordinates in emergency alerts.",
+        "NSMotionUsageDescription": "The app uses motion sensors to detect emergency gestures such as shaking or falling.",
         "UIBackgroundModes": [
           "location",
-          "fetch"
+          "fetch",
+          "remote-notification",
+          "processing"
         ]
       }
     },
+
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -35,19 +39,27 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
         "VIBRATE",
         "RECORD_AUDIO",
-        "CAMERA"
+        "CAMERA",
+        "FOREGROUND_SERVICE",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK"
       ]
     },
+
     "web": {
       "favicon": "./assets/favicon.png"
     },
+
     "plugins": [
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow Safety Emergency App to use your location to share with emergency contacts."
+          "locationAlwaysAndWhenInUsePermission": "Allow Safety Emergency App to use your location to share with emergency contacts.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [
@@ -61,7 +73,10 @@
         {
           "photosPermission": "The app accesses your photos to let you upload a profile picture."
         }
-      ]
+      ],
+      "expo-background-fetch",
+      "expo-task-manager",
+      "expo-notifications"
     ]
   }
 }

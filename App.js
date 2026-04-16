@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -8,84 +8,84 @@ import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 
-// Import screens
-import HomeScreen from './src/screens/HomeScreen';
+// Screens
+import HomeScreen            from './src/screens/HomeScreen';
 import GestureSettingsScreen from './src/screens/GestureSettingsScreen';
 import EmergencyContactsScreen from './src/screens/EmergencyContactsScreen';
-import AlertHistoryScreen from './src/screens/AlertHistoryScreen';
-import ProfileScreen from './src/screens/ProfileScreen';
-import AuthScreen from './src/screens/AuthScreen';
+import AlertHistoryScreen    from './src/screens/AlertHistoryScreen';
+import ProfileScreen         from './src/screens/ProfileScreen';
+import AuthScreen            from './src/screens/AuthScreen';
 
-// Import gesture service
-import gestureService from './src/services/GestureService';
+// Services
+import gestureService              from './src/services/GestureService';
+import { setAuthFailureCallback }  from './src/services/api';
 
-// Configure notifications
+// ── Notification handler (shown while app is foregrounded) ─────────────────
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
     shouldPlaySound: true,
-    shouldSetBadge: true,
+    shouldSetBadge:  true,
   }),
 });
 
-const Tab = createBottomTabNavigator();
+const Tab   = createBottomTabNavigator();
 const Stack = createStackNavigator();
 
 function HomeTabs() {
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
-        tabBarIcon: ({ focused, color, size }) => {
-          let iconName;
-          
-          if (route.name === 'Home') iconName = 'home';
-          else if (route.name === 'Gestures') iconName = 'touch-app';
-          else if (route.name === 'Contacts') iconName = 'contacts';
-          else if (route.name === 'History') iconName = 'history';
-          else if (route.name === 'Profile') iconName = 'person';
-          
-          return <MaterialIcons name={iconName} size={size} color={color} />;
+        tabBarIcon: ({ color, size }) => {
+          const icons = {
+            Home:     'home',
+            Gestures: 'touch-app',
+            Contacts: 'contacts',
+            History:  'history',
+            Profile:  'person',
+          };
+          return <MaterialIcons name={icons[route.name]} size={size} color={color} />;
         },
-        tabBarActiveTintColor: '#e74c3c',
+        tabBarActiveTintColor:   '#e74c3c',
         tabBarInactiveTintColor: 'gray',
-        headerStyle: { backgroundColor: '#e74c3c' },
-        headerTintColor: '#fff',
-        headerTitleStyle: { fontWeight: 'bold' },
+        headerStyle:             { backgroundColor: '#e74c3c' },
+        headerTintColor:         '#fff',
+        headerTitleStyle:        { fontWeight: 'bold' },
       })}
     >
-      <Tab.Screen name="Home" component={HomeScreen} options={{ title: 'Home' }} />
-      <Tab.Screen name="Gestures" component={GestureSettingsScreen} options={{ title: 'Gestures' }} />
+      <Tab.Screen name="Home"     component={HomeScreen}             options={{ title: 'Home' }} />
+      <Tab.Screen name="Gestures" component={GestureSettingsScreen}  options={{ title: 'Gestures' }} />
       <Tab.Screen name="Contacts" component={EmergencyContactsScreen} options={{ title: 'Contacts' }} />
-      <Tab.Screen name="History" component={AlertHistoryScreen} options={{ title: 'History' }} />
-      <Tab.Screen name="Profile" component={ProfileScreen} options={{ title: 'Profile' }} />
+      <Tab.Screen name="History"  component={AlertHistoryScreen}     options={{ title: 'History' }} />
+      <Tab.Screen name="Profile"  component={ProfileScreen}          options={{ title: 'Profile' }} />
     </Tab.Navigator>
   );
 }
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [appState, setAppState] = useState(AppState.currentState);
+  const [isLoading,       setIsLoading]       = useState(true);
+  const appStateRef = useRef(AppState.currentState);
 
-  const checkAuthStatus = useCallback(async () => {
+  // ── Auth check ───────────────────────────────────────────────────────────
+  const checkAuth = useCallback(async () => {
     try {
-      const userData = await AsyncStorage.getItem('user');
-      const token = await AsyncStorage.getItem('access_token');
-      
-      const authenticated = !!(userData && token);
-      setIsAuthenticated(authenticated);
-      
-      if (authenticated) {
-        // Update gesture service with user session
+      const [userData, token] = await Promise.all([
+        AsyncStorage.getItem('user'),
+        AsyncStorage.getItem('access_token'),
+      ]);
+      const authed = !!(userData && token);
+      setIsAuthenticated(authed);
+
+      if (authed) {
         gestureService.updateUserSession();
-        gestureService.startListening();
+        // Ensure service is listening (idempotent)
+        if (!gestureService.isListening) gestureService.startListening();
       } else {
         gestureService.stopListening();
       }
-      
-      console.log('Auth status:', authenticated ? 'Authenticated' : 'Not authenticated');
-    } catch (error) {
-      console.error('Error checking auth status:', error);
+    } catch (err) {
+      console.error('[App] checkAuth error:', err);
       setIsAuthenticated(false);
     } finally {
       setIsLoading(false);
@@ -93,40 +93,40 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    checkAuthStatus();
-    
-    // Request notification permissions
-    requestNotificationPermissions();
-    
-    // Listen for app state changes
-    const subscription = AppState.addEventListener('change', handleAppStateChange);
-    
+    // Register auth-failure callback so expired tokens navigate to login
+    setAuthFailureCallback(() => {
+      setIsAuthenticated(false);
+      gestureService.stopListening();
+    });
+
+    checkAuth();
+    _requestNotificationPerms();
+
+    // Initialize gesture service (registers background task etc.)
+    gestureService.initialize();
+
+    // Re-check auth when app returns to foreground
+    const sub = AppState.addEventListener('change', (next) => {
+      if (appStateRef.current.match(/inactive|background/) && next === 'active') {
+        checkAuth();
+      }
+      appStateRef.current = next;
+    });
+
     return () => {
-      subscription.remove();
+      sub.remove();
+      // Do NOT stop gesture service on unmount — we want it alive in background.
+      // It will be stopped by checkAuth() if the user is not authenticated.
     };
-  }, [checkAuthStatus]);
+  }, [checkAuth]);
 
-  const handleAppStateChange = (nextAppState) => {
-    if (appState.match(/inactive|background/) && nextAppState === 'active') {
-      // App came to foreground, check auth status again
-      checkAuthStatus();
-    }
-    setAppState(nextAppState);
-  };
-
-  const requestNotificationPermissions = async () => {
+  const _requestNotificationPerms = async () => {
     try {
       const { status } = await Notifications.requestPermissionsAsync();
-      if (status !== 'granted') {
-        console.log('Notification permissions not granted');
-      }
-    } catch (error) {
-      console.error('Error requesting permissions:', error);
+      if (status !== 'granted') console.log('[App] Notification perms denied');
+    } catch (e) {
+      console.error('[App] Notification perm error:', e);
     }
-  };
-
-  const handleAuthStateChange = () => {
-    checkAuthStatus();
   };
 
   if (isLoading) {
@@ -141,16 +141,13 @@ export default function App() {
     <SafeAreaProvider>
       <NavigationContainer>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
-          {!isAuthenticated ? (
-            <Stack.Screen 
-              name="Auth" 
-              component={AuthScreen}
-              initialParams={{ onLogin: handleAuthStateChange }}
-            />
+          {isAuthenticated ? (
+            <Stack.Screen name="MainApp" component={HomeTabs} />
           ) : (
-            <Stack.Screen 
-              name="MainApp" 
-              component={HomeTabs}
+            <Stack.Screen
+              name="Auth"
+              component={AuthScreen}
+              initialParams={{ onLogin: checkAuth }}
             />
           )}
         </Stack.Navigator>

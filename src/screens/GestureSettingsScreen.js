@@ -7,13 +7,15 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
-  ActivityIndicator
+  ActivityIndicator,
+  Modal,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialIcons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import * as Haptics from 'expo-haptics';
 import api from '../services/api';
+import gestureService from '../services/GestureService';
 
 const GestureSettingsScreen = () => {
   const [gestures, setGestures] = useState([
@@ -23,7 +25,7 @@ const GestureSettingsScreen = () => {
       description: 'Press both volume buttons simultaneously',
       icon: 'volume-up',
       enabled: true,
-      sensitivity: 5
+      sensitivity: 5,
     },
     {
       id: 'power_button_three',
@@ -31,7 +33,7 @@ const GestureSettingsScreen = () => {
       description: 'Press power button 3 times quickly',
       icon: 'power-settings-new',
       enabled: true,
-      sensitivity: 5
+      sensitivity: 5,
     },
     {
       id: 'all_buttons',
@@ -39,7 +41,7 @@ const GestureSettingsScreen = () => {
       description: 'Press all buttons for 3 seconds',
       icon: 'dialpad',
       enabled: true,
-      sensitivity: 5
+      sensitivity: 5,
     },
     {
       id: 'back_tap',
@@ -47,7 +49,7 @@ const GestureSettingsScreen = () => {
       description: 'Double tap on back of phone',
       icon: 'touch-app',
       enabled: true,
-      sensitivity: 5
+      sensitivity: 5,
     },
     {
       id: 'shake',
@@ -55,7 +57,7 @@ const GestureSettingsScreen = () => {
       description: 'Shake phone for 5 seconds',
       icon: 'vibration',
       enabled: true,
-      sensitivity: 5
+      sensitivity: 5,
     },
     {
       id: 'screen_cover',
@@ -63,7 +65,7 @@ const GestureSettingsScreen = () => {
       description: 'Cover proximity sensor for 3 seconds',
       icon: 'screen-lock-portrait',
       enabled: true,
-      sensitivity: 5
+      sensitivity: 5,
     },
     {
       id: 'fall_detection',
@@ -71,13 +73,16 @@ const GestureSettingsScreen = () => {
       description: 'Detect sudden fall with no movement',
       icon: 'warning',
       enabled: true,
-      sensitivity: 5
-    }
+      sensitivity: 5,
+    },
   ]);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [user, setUser] = useState(null);
+  const [testModalVisible, setTestModalVisible] = useState(false);
+  const [testingGesture, setTestingGesture] = useState(null);
+  const [testResult, setTestResult] = useState(null); // null, 'success', 'failure'
+  const [testListening, setTestListening] = useState(false);
 
   useEffect(() => {
     loadUserAndPreferences();
@@ -86,29 +91,24 @@ const GestureSettingsScreen = () => {
   const loadUserAndPreferences = async () => {
     try {
       setLoading(true);
-      
-      // Get current user
       const userData = await AsyncStorage.getItem('user');
       const token = await AsyncStorage.getItem('access_token');
-      
+
       if (userData && token) {
-        setUser(JSON.parse(userData));
-        
-        // Load gesture preferences from backend
         const response = await api.get('/api/gesture-preferences');
-        
+
         if (response.data.success) {
           const preferences = response.data.preferences;
-          
-          // Update gestures with saved preferences
-          setGestures(prevGestures => 
-            prevGestures.map(gesture => {
-              const savedPref = preferences.find(p => p.gesture_type === gesture.id);
-              return savedPref ? {
-                ...gesture,
-                enabled: savedPref.enabled,
-                sensitivity: savedPref.sensitivity
-              } : gesture;
+          setGestures((prevGestures) =>
+            prevGestures.map((gesture) => {
+              const savedPref = preferences.find((p) => p.gesture_type === gesture.id);
+              return savedPref
+                ? {
+                    ...gesture,
+                    enabled: savedPref.enabled,
+                    sensitivity: savedPref.sensitivity,
+                  }
+                : gesture;
             })
           );
         }
@@ -122,89 +122,81 @@ const GestureSettingsScreen = () => {
   };
 
   const toggleGesture = async (gestureId) => {
-    // Update local state
-    const updatedGestures = gestures.map(g => 
+    const updatedGestures = gestures.map((g) =>
       g.id === gestureId ? { ...g, enabled: !g.enabled } : g
     );
     setGestures(updatedGestures);
-    
-    // Save to backend
+
     try {
       setSaving(true);
-      
       await api.put('/api/gesture-preferences', {
-        preferences: updatedGestures.map(g => ({
+        preferences: updatedGestures.map((g) => ({
           gesture_type: g.id,
           enabled: g.enabled,
-          sensitivity: g.sensitivity
-        }))
+          sensitivity: g.sensitivity,
+        })),
       });
-      
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      
     } catch (error) {
       console.error('Error updating gesture:', error.response?.data || error.message);
       Alert.alert('Error', 'Failed to update gesture setting');
-      // Revert on error
-      setGestures(prev => prev.map(g => 
-        g.id === gestureId ? { ...g, enabled: !g.enabled } : g
-      ));
+      setGestures((prev) =>
+        prev.map((g) => (g.id === gestureId ? { ...g, enabled: !g.enabled } : g))
+      );
     } finally {
       setSaving(false);
     }
   };
 
   const updateSensitivity = async (gestureId, value) => {
-    // Update local state
-    const updatedGestures = gestures.map(g => 
+    const updatedGestures = gestures.map((g) =>
       g.id === gestureId ? { ...g, sensitivity: value } : g
     );
     setGestures(updatedGestures);
-    
-    // Save to backend
+
     try {
       await api.put('/api/gesture-preferences', {
-        preferences: updatedGestures.map(g => ({
+        preferences: updatedGestures.map((g) => ({
           gesture_type: g.id,
           enabled: g.enabled,
-          sensitivity: g.sensitivity
-        }))
+          sensitivity: g.sensitivity,
+        })),
       });
-      
     } catch (error) {
       console.error('Error updating sensitivity:', error.response?.data || error.message);
     }
   };
 
-  const testGesture = (gestureId) => {
-    const gesture = gestures.find(g => g.id === gestureId);
-    
-    Alert.alert(
-      'Test Gesture',
-      `Testing: ${gesture.name}\n\nPerform the gesture now.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Start Test', 
-          onPress: () => {
-            Alert.alert(
-              'Listening',
-              'Perform the gesture...',
-              [
-                {
-                  text: 'Gesture Performed',
-                  onPress: () => {
-                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                    Alert.alert('Success', 'Gesture detected!');
-                  }
-                },
-                { text: 'Cancel' }
-              ]
-            );
-          }
-        }
-      ]
-    );
+  const testGesture = async (gesture) => {
+    // Show the listening modal
+    setTestingGesture(gesture);
+    setTestResult(null);
+    setTestListening(true);
+    setTestModalVisible(true);
+
+    try {
+      const success = await gestureService.startTestForGesture(gesture.id, 10);
+      setTestListening(false);
+      setTestResult(success);
+      Haptics.notificationAsync(
+        success
+          ? Haptics.NotificationFeedbackType.Success
+          : Haptics.NotificationFeedbackType.Error
+      );
+      // Auto-close modal after 2 seconds
+      setTimeout(() => {
+        setTestModalVisible(false);
+        setTestingGesture(null);
+        setTestResult(null);
+      }, 2000);
+    } catch (error) {
+      console.error('Test error:', error);
+      setTestListening(false);
+      setTestResult(false);
+      setTimeout(() => {
+        setTestModalVisible(false);
+      }, 2000);
+    }
   };
 
   const resetToDefaults = async () => {
@@ -219,24 +211,21 @@ const GestureSettingsScreen = () => {
           onPress: async () => {
             try {
               setLoading(true);
-              
-              const defaultGestures = gestures.map(g => ({
+              const defaultGestures = gestures.map((g) => ({
                 gesture_type: g.id,
                 enabled: true,
-                sensitivity: 5
+                sensitivity: 5,
               }));
-              
               await api.put('/api/gesture-preferences', {
-                preferences: defaultGestures
+                preferences: defaultGestures,
               });
-              
-              // Update local state
-              setGestures(prev => prev.map(g => ({
-                ...g,
-                enabled: true,
-                sensitivity: 5
-              })));
-              
+              setGestures((prev) =>
+                prev.map((g) => ({
+                  ...g,
+                  enabled: true,
+                  sensitivity: 5,
+                }))
+              );
               Alert.alert('Success', 'Settings reset to default');
             } catch (error) {
               console.error('Error resetting settings:', error.response?.data || error.message);
@@ -244,8 +233,8 @@ const GestureSettingsScreen = () => {
             } finally {
               setLoading(false);
             }
-          }
-        }
+          },
+        },
       ]
     );
   };
@@ -298,9 +287,11 @@ const GestureSettingsScreen = () => {
               <View style={styles.sensitivityHeader}>
                 <Text style={styles.sensitivityLabel}>Sensitivity</Text>
                 <Text style={styles.sensitivityValue}>
-                  {gesture.sensitivity === 1 ? 'Low' : 
-                   gesture.sensitivity === 10 ? 'High' : 
-                   `${gesture.sensitivity}/10`}
+                  {gesture.sensitivity === 1
+                    ? 'Low'
+                    : gesture.sensitivity === 10
+                    ? 'High'
+                    : `${gesture.sensitivity}/10`}
                 </Text>
               </View>
               <Slider
@@ -320,7 +311,7 @@ const GestureSettingsScreen = () => {
 
           <TouchableOpacity
             style={styles.testButton}
-            onPress={() => testGesture(gesture.id)}
+            onPress={() => testGesture(gesture)}
           >
             <MaterialIcons name="play-arrow" size={16} color="#666" />
             <Text style={styles.testButtonText}>Test Gesture</Text>
@@ -339,6 +330,53 @@ const GestureSettingsScreen = () => {
           Test your gestures in a safe environment. Higher sensitivity means easier to trigger.
         </Text>
       </View>
+
+      {/* Test Gesture Modal */}
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={testModalVisible}
+        onRequestClose={() => setTestModalVisible(false)}
+      >
+        <View style={styles.testModalOverlay}>
+          <View style={styles.testModalContent}>
+            {testListening ? (
+              <>
+                <MaterialIcons name="mic-none" size={60} color="#e74c3c" />
+                <Text style={styles.testModalTitle}>
+                  Perform {testingGesture?.name}
+                </Text>
+                <Text style={styles.testModalSubtitle}>
+                  {testingGesture?.description}
+                </Text>
+                <View style={styles.listeningAnimation}>
+                  <View style={styles.pulseDot} />
+                  <Text style={styles.listeningText}>Listening...</Text>
+                </View>
+                <Text style={styles.testModalHint}>
+                  You have 10 seconds to perform the gesture
+                </Text>
+              </>
+            ) : testResult === true ? (
+              <>
+                <MaterialIcons name="check-circle" size={60} color="#2ecc71" />
+                <Text style={[styles.testModalTitle, { color: '#2ecc71' }]}>Success!</Text>
+                <Text style={styles.testModalSubtitle}>
+                  {testingGesture?.name} was detected correctly
+                </Text>
+              </>
+            ) : testResult === false ? (
+              <>
+                <MaterialIcons name="error" size={60} color="#e74c3c" />
+                <Text style={[styles.testModalTitle, { color: '#e74c3c' }]}>Failed</Text>
+                <Text style={styles.testModalSubtitle}>
+                  {testingGesture?.name} was not detected. Try again.
+                </Text>
+              </>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 };
@@ -485,6 +523,54 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#2c3e50',
     lineHeight: 18,
+  },
+  testModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  testModalContent: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 30,
+    alignItems: 'center',
+    width: '80%',
+  },
+  testModalTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginTop: 20,
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  testModalSubtitle: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  listeningAnimation: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 20,
+  },
+  pulseDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#e74c3c',
+    marginRight: 10,
+  },
+  listeningText: {
+    fontSize: 16,
+    color: '#e74c3c',
+    fontWeight: '500',
+  },
+  testModalHint: {
+    fontSize: 12,
+    color: '#999',
+    marginTop: 10,
   },
 });
 

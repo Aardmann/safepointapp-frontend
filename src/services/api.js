@@ -7,7 +7,8 @@ const getApiUrl = async () => {
   try {
     const COMPUTER_IP = '172.20.10.2'; // Change to your computer's IP
     if (__DEV__) {
-      if (Platform.OS === 'ios') return 'http://localhost:5000';
+      //if (Platform.OS === 'ios') return 'http://localhost:5000';
+      if (Platform.OS === 'ios') return 'http://172.20.10.2:5000';
       if (Platform.OS === 'android') return 'http://10.0.2.2:5000';
     }
     return `http://${COMPUTER_IP}:5000`;
