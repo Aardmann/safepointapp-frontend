@@ -376,7 +376,8 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 # Edit .env with your Supabase credentials
-python app.py
+python app.py 
+# or python3 based on your pyhton version
 
 # Frontend (new terminal)
 cd frontend

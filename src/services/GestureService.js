@@ -1,202 +1,179 @@
 import { Accelerometer } from 'expo-sensors';
 import * as Notifications from 'expo-notifications';
+import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import axios from 'axios';
 
-// Try to import background modules, but don't fail if they're not available
-let TaskManager, BackgroundFetch;
-try {
-  TaskManager = require('expo-task-manager');
-  BackgroundFetch = require('expo-background-fetch');
-} catch (error) {
-  console.log('Background modules not available:', error.message);
-}
+// GestureService: Detects configured gestures and triggers emergencies.
+// - Listens to accelerometer data for shake and fall detection.
+// - Hooks into hardware button events (power, volume, back tap).
+// - Manages gesture preferences loaded from the backend.
+// - Handles emergency triggering logic with debouncing and notifications.
+// - Exposes a callback for HomeScreen to show the 5-second countdown + cancel dialog.
+// - Uses the shared API instance for backend communication (benefits from auto token refresh and correct base URL).
 
-const GESTURE_DETECTION_TASK = 'background-gesture-detection';
-const SHAKE_DURATION = 5000; // 5 seconds for shake gesture
-const POWER_BUTTON_PRESSES = 3; // 3 presses for power button
+// Note: Hardware button event listeners (power, volume, back tap) require native code integration.
+// For this example, we assume those events are properly hooked and call the corresponding handler methods.
+import api from './api';
+
+const SHAKE_DURATION = 5000;    // 5 seconds of continuous shaking
+const POWER_BUTTON_PRESSES = 3; // 3 rapid presses
 
 class GestureService {
   constructor() {
     this.isListening = false;
     this.shakeStartTime = null;
-    this.shakeCount = 0;
-    this.lastShakeTime = 0;
     this.powerButtonPresses = 0;
     this.lastPowerPressTime = 0;
     this.screenCoverStartTime = null;
     this.fallDetectionTimer = null;
     this.gestureSettings = null;
-    this.API_URL = 'http://localhost:5000'; // Change to your computer's IP
-    
-    // Accelerometer data for fall detection
+
+    // Set by HomeScreen to show the 5-second countdown + cancel dialog.
+    // Null when the app is in the background → sends directly.
+    this.onEmergencyDetected = null;
+
+    // Prevent duplicate triggers within a 10-second window
+    this._emergencyPending = false;
+
     this.accelerometerData = { x: 0, y: 0, z: 0 };
-    
-    // Bind methods
     this.handleAccelerometerData = this.handleAccelerometerData.bind(this);
+  }
+
+  // ─── Public API ────────────────────────────────────────────────────────────
+
+  setEmergencyCallback(callback) {
+    this.onEmergencyDetected = callback;
   }
 
   async initialize() {
     try {
-      // Load user settings
       await this.loadGestureSettings();
-      
-      // Request permissions
       await this.requestPermissions();
-      
-      // Start listening
       this.startListening();
-      
-      console.log('Gesture service initialized');
+      console.log('[GestureService] Initialized');
     } catch (error) {
-      console.error('Error initializing gesture service:', error);
+      console.error('[GestureService] Init error:', error);
     }
   }
 
   async requestPermissions() {
     try {
-      // Request notification permissions
-      const { status: existingStatus } = await Notifications.getPermissionsAsync();
-      let finalStatus = existingStatus;
-      
-      if (existingStatus !== 'granted') {
-        const { status } = await Notifications.requestPermissionsAsync();
-        finalStatus = status;
+      const { status: notifStatus } = await Notifications.getPermissionsAsync();
+      if (notifStatus !== 'granted') {
+        await Notifications.requestPermissionsAsync();
       }
-      
-      if (finalStatus !== 'granted') {
-        console.log('Failed to get push token for notifications');
+
+      const { status: locStatus } = await Location.requestForegroundPermissionsAsync();
+      if (locStatus !== 'granted') {
+        console.log('[GestureService] Location permission denied');
       }
     } catch (error) {
-      console.error('Error requesting permissions:', error);
+      console.error('[GestureService] Permission error:', error);
     }
   }
 
   async loadGestureSettings() {
     try {
       const token = await AsyncStorage.getItem('access_token');
-      const user = await AsyncStorage.getItem('user');
-      
-      if (!token || !user) return;
-      
-      const response = await axios.get(`${this.API_URL}/api/gesture-preferences`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      
+      if (!token) return;
+
+      // ✅ Use shared api — benefits from auto token refresh & correct base URL
+      const response = await api.get('/api/gesture-preferences');
+
       if (response.data.success) {
         this.gestureSettings = response.data.preferences.reduce((acc, pref) => {
           acc[pref.gesture_type] = pref;
           return acc;
         }, {});
+        console.log('[GestureService] Settings loaded');
       }
     } catch (error) {
-      console.error('Error loading gesture settings:', error);
+      console.error('[GestureService] Failed to load settings:', error.message);
     }
   }
 
   startListening() {
     if (this.isListening) return;
-    
     this.isListening = true;
-    
-    // Set up accelerometer listener
     this.accelerometerSubscription = Accelerometer.addListener(this.handleAccelerometerData);
-    
-    Accelerometer.setUpdateInterval(100); // 100ms interval
-    
-    console.log('Gesture listening started');
+    Accelerometer.setUpdateInterval(100);
+    console.log('[GestureService] Listening started');
   }
 
   stopListening() {
     if (this.accelerometerSubscription) {
       this.accelerometerSubscription.remove();
     }
-    
     this.isListening = false;
-    console.log('Gesture listening stopped');
+    console.log('[GestureService] Listening stopped');
   }
+
+  async updateUserSession() {
+    await this.loadGestureSettings();
+  }
+
+  // ─── Accelerometer ─────────────────────────────────────────────────────────
 
   handleAccelerometerData(data) {
     this.accelerometerData = data;
-    
-    // Check if we have settings
     if (!this.gestureSettings) return;
-    
-    // Calculate acceleration magnitude
-    const acceleration = Math.sqrt(
-      data.x * data.x + data.y * data.y + data.z * data.z
-    );
-    
+
+    const magnitude = Math.sqrt(data.x ** 2 + data.y ** 2 + data.z ** 2);
     const now = Date.now();
-    
-    // Check for shake gesture (5 seconds continuous shaking)
+
     if (this.gestureSettings.shake?.enabled) {
-      this.detectShake(acceleration, now);
+      this.detectShake(magnitude, now);
     }
-    
-    // Check for fall detection
     if (this.gestureSettings.fall_detection?.enabled) {
-      this.detectFall(acceleration, now);
+      this.detectFall(magnitude, now);
     }
   }
 
-  detectShake(acceleration, timestamp) {
+  detectShake(magnitude, timestamp) {
     const sensitivity = this.gestureSettings.shake?.sensitivity || 5;
-    const threshold = 2.0 + ((sensitivity - 5) * 0.1); // Adjust threshold based on sensitivity
-    
-    if (acceleration > threshold) {
+    const threshold = 2.0 + (sensitivity - 5) * 0.1;
+
+    if (magnitude > threshold) {
       if (!this.shakeStartTime) {
         this.shakeStartTime = timestamp;
       } else if (timestamp - this.shakeStartTime >= SHAKE_DURATION) {
-        // Shake detected for required duration
         this.triggerEmergency('shake');
         this.shakeStartTime = null;
       }
     } else {
-      // Reset if shaking stops
       if (this.shakeStartTime && timestamp - this.shakeStartTime < SHAKE_DURATION) {
         this.shakeStartTime = null;
       }
     }
   }
 
-  detectFall(acceleration, timestamp) {
+  detectFall(magnitude, timestamp) {
     const sensitivity = this.gestureSettings.fall_detection?.sensitivity || 5;
-    const fallThreshold = 4.0 + ((sensitivity - 5) * 0.2); // Adjust threshold based on sensitivity
-    
-    // Check for sudden impact
-    if (acceleration > fallThreshold) {
-      // Possible fall detected, wait for stillness
-      if (!this.fallDetectionTimer) {
-        this.fallDetectionTimer = setTimeout(() => {
-          // Check if device is still (minimal movement)
-          const stillness = Math.abs(this.accelerometerData.x) < 0.5 &&
-                           Math.abs(this.accelerometerData.y) < 0.5 &&
-                           Math.abs(this.accelerometerData.z) < 0.5;
-          
-          if (stillness) {
-            this.triggerEmergency('fall_detection');
-          }
-          
-          this.fallDetectionTimer = null;
-        }, 3000);
-      }
+    const fallThreshold = 4.0 + (sensitivity - 5) * 0.2;
+
+    if (magnitude > fallThreshold && !this.fallDetectionTimer) {
+      this.fallDetectionTimer = setTimeout(() => {
+        const { x, y, z } = this.accelerometerData;
+        const isStill = Math.abs(x) < 0.5 && Math.abs(y) < 0.5 && Math.abs(z) < 0.5;
+        if (isStill) {
+          this.triggerEmergency('fall_detection');
+        }
+        this.fallDetectionTimer = null;
+      }, 3000);
     }
   }
 
-  // Call this from native modules for power button detection
+  // ─── Hardware button hooks ─────────────────────────────────────────────────
+
   handlePowerButtonPress() {
     if (!this.gestureSettings?.power_button_three?.enabled) return;
-    
     const now = Date.now();
     const sensitivity = this.gestureSettings.power_button_three?.sensitivity || 5;
-    const timeWindow = 1500 - ((sensitivity - 5) * 50); // 1-1.5 second window
-    
+    const timeWindow = 1500 - (sensitivity - 5) * 50;
+
     if (now - this.lastPowerPressTime < timeWindow) {
       this.powerButtonPresses++;
-      
       if (this.powerButtonPresses >= POWER_BUTTON_PRESSES) {
         this.triggerEmergency('power_button_three');
         this.powerButtonPresses = 0;
@@ -204,36 +181,28 @@ class GestureService {
     } else {
       this.powerButtonPresses = 1;
     }
-    
     this.lastPowerPressTime = now;
   }
 
-  // Call this from native modules for volume button detection
   handleVolumeButtonsPress() {
     if (!this.gestureSettings?.volume_buttons?.enabled) return;
     this.triggerEmergency('volume_buttons');
   }
 
-  // Call this from native modules for all buttons press
   handleAllButtonsPress() {
     if (!this.gestureSettings?.all_buttons?.enabled) return;
     this.triggerEmergency('all_buttons');
   }
 
-  // Call this from native modules for back tap detection
   handleBackTap() {
     if (!this.gestureSettings?.back_tap?.enabled) return;
     this.triggerEmergency('back_tap');
   }
 
-  // Call this from native modules for screen cover detection
   handleScreenCover() {
     if (!this.gestureSettings?.screen_cover?.enabled) return;
-    
     if (!this.screenCoverStartTime) {
       this.screenCoverStartTime = Date.now();
-      
-      // Check after 3 seconds if still covered
       setTimeout(() => {
         if (this.screenCoverStartTime && Date.now() - this.screenCoverStartTime >= 3000) {
           this.triggerEmergency('screen_cover');
@@ -243,120 +212,101 @@ class GestureService {
     }
   }
 
+  // ─── Core emergency logic ──────────────────────────────────────────────────
+
   async triggerEmergency(triggerType) {
+    if (this._emergencyPending) return;
+    this._emergencyPending = true;
+    setTimeout(() => { this._emergencyPending = false; }, 10000);
+
+    console.log(`[GestureService] Gesture detected → ${triggerType}`);
+
     try {
-      console.log(`Emergency triggered via: ${triggerType}`);
-      
-      // Provide haptic feedback
-      try {
-        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      } catch (error) {
-        console.log('Haptics not available');
-      }
-      
-      // Show local notification
-      try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Emergency Alert Triggered',
-            body: `Gesture detected: ${triggerType.replace(/_/g, ' ')}`,
-            data: { triggerType },
-          },
-          trigger: null,
-        });
-      } catch (error) {
-        console.log('Notification error:', error);
-      }
-      
-      // Get current location
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    } catch (_) {}
+
+    if (typeof this.onEmergencyDetected === 'function') {
+      // Foreground: let HomeScreen show the 5-second countdown + cancel
+      this.onEmergencyDetected(triggerType);
+    } else {
+      // Background: send immediately
+      await this._sendDirectly(triggerType);
+    }
+  }
+
+  async sendEmergencyToBackend(triggerType) {
+    try {
       const location = await this.getCurrentLocation();
-      
-      // Get user token
-      const token = await AsyncStorage.getItem('access_token');
-      
-      if (!token) {
-        console.log('No token available');
-        return;
-      }
-      
-      // Send to backend
-      try {
-        const response = await axios.post(
-          `${this.API_URL}/api/emergency/trigger`,
-          {
-            trigger_type: triggerType,
-            location: location
-          },
-          {
-            headers: { 'Authorization': `Bearer ${token}` }
-          }
+
+      // ✅ Use shared api — token is injected by the request interceptor
+      const response = await api.post('/api/emergency/trigger', {
+        trigger_type: triggerType,
+        location,
+      });
+
+      if (response.data.success) {
+        await this._showNotification(
+          'Emergency Alert Sent ✅',
+          'Your emergency contacts have been notified.'
         );
-        
-        if (response.data.success) {
-          // Show success notification
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: 'Emergency Alert Sent',
-              body: 'Your emergency contacts have been notified',
-              data: { success: true },
-            },
-            trigger: null,
-          });
-        }
-      } catch (error) {
-        console.error('Error sending to backend:', error);
-        throw error;
       }
+
+      return response.data;
     } catch (error) {
-      console.error('Error triggering emergency:', error);
-      
-      // Show error notification
-      try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Emergency Alert Failed',
-            body: 'Please try again or call emergency services directly',
-            data: { error: true },
-          },
-          trigger: null,
-        });
-      } catch (notifError) {
-        console.log('Error notification failed:', notifError);
-      }
+      console.error('[GestureService] Backend send failed:', error.message);
+      await this._showNotification(
+        'Emergency Alert Failed ❌',
+        'Could not reach server. Please call emergency services directly.'
+      );
+      return { success: false, error: error.message };
+    }
+  }
+
+  // ─── Private helpers ───────────────────────────────────────────────────────
+
+  async _sendDirectly(triggerType) {
+    await this._showNotification(
+      '🚨 Emergency Alert Triggered',
+      `Gesture: ${triggerType.replace(/_/g, ' ')} — sending alert to your contacts…`
+    );
+    await this.sendEmergencyToBackend(triggerType);
+  }
+
+  async _showNotification(title, body) {
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: { title, body },
+        trigger: null,
+      });
+    } catch (e) {
+      console.log('[GestureService] Notification error:', e.message);
     }
   }
 
   async getCurrentLocation() {
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
-        const location = await Location.getCurrentPositionAsync({});
-        const address = await Location.reverseGeocodeAsync({
-          latitude: location.coords.latitude,
-          longitude: location.coords.longitude
-        });
-        
-        return {
-          lat: location.coords.latitude,
-          lng: location.coords.longitude,
-          address: address[0] ? 
-            `${address[0].street || ''}, ${address[0].city || ''}, ${address[0].country || ''}`.replace(/^, |, $/g, '') 
-            : 'Unknown'
-        };
-      }
-    } catch (error) {
-      console.error('Error getting location:', error);
-    }
-    
-    return null;
-  }
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status !== 'granted') return null;
 
-  // Method to be called from main app when user logs in/out
-  async updateUserSession() {
-    await this.loadGestureSettings();
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const [geo] = await Location.reverseGeocodeAsync({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+      });
+
+      return {
+        lat: loc.coords.latitude,
+        lng: loc.coords.longitude,
+        address: geo
+          ? [geo.street, geo.city, geo.country].filter(Boolean).join(', ')
+          : 'Unknown location',
+      };
+    } catch (error) {
+      console.error('[GestureService] Location error:', error.message);
+      return null;
+    }
   }
 }
 
-// Create singleton instance
 const gestureService = new GestureService();
 export default gestureService;
